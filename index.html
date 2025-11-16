@@ -1,1 +1,419 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <title>簡易 Windy Demo（Leaflet + Open-Meteo）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      background: #020617;
+      color: #e5e7eb;
+    }
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+    header {
+      padding: 0.75rem 1rem;
+      background: #0f172a;
+      border-bottom: 1px solid #1f2937;
+    }
+    header h1 {
+      margin: 0 0 0.25rem;
+      font-size: 1.05rem;
+    }
+    header p {
+      margin: 0;
+      font-size: 0.8rem;
+      color: #9ca3af;
+    }
+    .map-wrapper {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+    }
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+    #wind-canvas {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .forecast-panel {
+      position: absolute;
+      left: 1rem;
+      right: 1rem;
+      bottom: 1rem;
+      max-height: 45vh;
+      background: rgba(15, 23, 42, 0.96);
+      color: #e5e7eb;
+      border-radius: 0.75rem;
+      box-shadow: 0 12px 35px rgba(15, 23, 42, 0.85);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      font-size: 0.8rem;
+    }
+    .forecast-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.6rem 0.8rem;
+      border-bottom: 1px solid rgba(55, 65, 81, 0.9);
+    }
+    .forecast-header-main {
+      display: flex;
+      flex-direction: column;
+      gap: 0.1rem;
+    }
+    .forecast-title { font-weight: 600; }
+    .forecast-sub {
+      color: #9ca3af;
+      font-size: 0.75rem;
+    }
+    .forecast-current {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 0.15rem;
+      font-size: 0.78rem;
+    }
+    .forecast-current span { white-space: nowrap; }
+    .close-btn {
+      background: transparent;
+      border: none;
+      color: #9ca3af;
+      cursor: pointer;
+      font-size: 1rem;
+      padding: 0.2rem 0.4rem;
+      border-radius: 999px;
+    }
+    .close-btn:hover {
+      background: rgba(55, 65, 81, 0.7);
+      color: #e5e7eb;
+    }
+    .forecast-table-wrapper { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    thead {
+      position: sticky;
+      top: 0;
+      background: rgba(30, 64, 175, 0.8);
+      z-index: 1;
+    }
+    th, td {
+      padding: 0.35rem 0.45rem;
+      text-align: center;
+      border-bottom: 1px solid rgba(31, 41, 55, 0.95);
+      white-space: nowrap;
+    }
+    th { font-weight: 600; font-size: 0.76rem; }
+    td { font-size: 0.75rem; }
+    @media (max-width: 768px) {
+      header h1 { font-size: 0.95rem; }
+      header p { font-size: 0.75rem; }
+      .forecast-panel { left: 0.5rem; right: 0.5rem; }
+      th, td { padding: 0.25rem 0.3rem; }
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>簡易 Windy Demo（Leaflet + Open-Meteo 真實資料）</h1>
+    <p>拖曳地圖、觀看風場粒子；點擊任一地點，即時抓取該點的真實預報（Open-Meteo）。</p>
+  </header>
+
+  <div class="map-wrapper">
+    <div id="map"></div>
+    <canvas id="wind-canvas"></canvas>
+    <div id="forecast-panel" class="forecast-panel" style="display:none;"></div>
+  </div>
+</div>
+
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+  crossorigin=""
+></script>
+
+<script>
+  const DEFAULT_CENTER = { lat: 23.0, lon: 120.0 };
+  const FORECAST_HOURS = 12;
+
+  function buildOpenMeteoUrl(lat, lon) {
+    const base = 'https://api.open-meteo.com/v1/forecast';
+    const params = new URLSearchParams({
+      latitude: lat,
+      longitude: lon,
+      current: 'temperature_2m,wind_speed_10m,wind_direction_10m',
+      hourly: 'temperature_2m,wind_speed_10m,wind_direction_10m,precipitation,cloud_cover',
+      timezone: 'auto'
+    });
+    return `${base}?${params.toString()}`;
+  }
+
+  const map = L.map('map', {
+    center: [DEFAULT_CENTER.lat, DEFAULT_CENTER.lon],
+    zoom: 5,
+    minZoom: 2,
+    maxZoom: 12
+  });
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors'
+  }).addTo(map);
+
+  const canvas = document.getElementById('wind-canvas');
+  const ctx = canvas.getContext('2d');
+
+  function resizeCanvas() {
+    const rect = document.getElementById('map').getBoundingClientRect();
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+  }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  const particles = [];
+  const MAX_PARTICLES = 700;
+  let animationId = null;
+
+  let currentWind = { speed: 5, direction: 270 };
+
+  function kmhToPixelsPerFrame(kmh) { return kmh / 8; }
+
+  function generateParticle() {
+    const w = canvas.width;
+    const h = canvas.height;
+    const x = Math.random() * w;
+    const y = Math.random() * h;
+
+    const dirRad = ((360 - currentWind.direction) * Math.PI) / 180;
+    const baseSpeed = kmhToPixelsPerFrame(currentWind.speed || 5);
+    const speed = baseSpeed * (0.4 + Math.random() * 0.8);
+    const vx = Math.cos(dirRad) * speed;
+    const vy = Math.sin(dirRad) * speed;
+
+    return { x, y, vx, vy, life: 40 + Math.random() * 60 };
+  }
+
+  function initParticles() {
+    particles.length = 0;
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+      particles.push(generateParticle());
+    }
+  }
+
+  function resetParticles() {
+    for (let i = 0; i < particles.length; i++) {
+      particles[i] = generateParticle();
+    }
+  }
+
+  function animate() {
+    const w = canvas.width;
+    const h = canvas.height;
+
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.86)';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(96, 165, 250, 0.9)';
+
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      const oldX = p.x;
+      const oldY = p.y;
+
+      p.x += p.vx;
+      p.y += p.vy;
+      p.life -= 1;
+
+      if (p.x < 0 || p.x >= w || p.y < 0 || p.y >= h || p.life <= 0) {
+        particles[i] = generateParticle();
+        continue;
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(oldX, oldY);
+      ctx.lineTo(p.x, p.y);
+      ctx.stroke();
+    }
+
+    animationId = requestAnimationFrame(animate);
+  }
+
+  function startAnimation() {
+    if (animationId) return;
+    initParticles();
+    animationId = requestAnimationFrame(animate);
+  }
+
+  function stopAnimation() {
+    if (animationId) {
+      cancelAnimationFrame(animationId);
+      animationId = null;
+    }
+  }
+
+  async function updateWindByMapCenter() {
+    const center = map.getCenter();
+    const url = buildOpenMeteoUrl(center.lat, center.lng);
+    try {
+      const res = await fetch(url);
+      const data = await res.json();
+      if (data && data.current) {
+        const s = data.current.wind_speed_10m;
+        const d = data.current.wind_direction_10m;
+        if (typeof s === 'number' && typeof d === 'number') {
+          currentWind.speed = s;
+          currentWind.direction = d;
+          resetParticles();
+        }
+      }
+    } catch (err) {
+      console.error('更新風場失敗', err);
+    }
+  }
+
+  map.whenReady(() => {
+    updateWindByMapCenter();
+    startAnimation();
+  });
+
+  map.on('moveend', () => {
+    updateWindByMapCenter();
+  });
+
+  const forecastPanel = document.getElementById('forecast-panel');
+
+  function formatLocalTime(isoStr) {
+    const d = new Date(isoStr);
+    const h = d.getHours().toString().padStart(2, '0');
+    const m = d.getMinutes().toString().padStart(2, '0');
+    return `${h}:${m}`;
+  }
+
+  function renderForecast(lat, lon, data) {
+    if (!data.hourly || !data.hourly.time) {
+      forecastPanel.style.display = 'none';
+      return;
+    }
+
+    const times = data.hourly.time;
+    const T = data.hourly.temperature_2m || [];
+    const WS = data.hourly.wind_speed_10m || [];
+    const WD = data.hourly.wind_direction_10m || [];
+    const P = data.hourly.precipitation || [];
+    const C = data.hourly.cloud_cover || [];
+
+    const rows = [];
+    const now = Date.now();
+    for (let i = 0; i < times.length && rows.length < FORECAST_HOURS; i++) {
+      const t = new Date(times[i]).getTime();
+      if (t >= now) {
+        rows.push({
+          time: times[i],
+          temperature: T[i],
+          windSpeed: WS[i],
+          windDirection: WD[i],
+          precipitation: P[i],
+          cloudCover: C[i]
+        });
+      }
+    }
+
+    const current = data.current || {};
+    const currentTemp = current.temperature_2m;
+    const currentWindSpeed = current.wind_speed_10m;
+    const currentWindDir = current.wind_direction_10m;
+
+    const latStr = lat.toFixed(3);
+    const lonStr = lon.toFixed(3);
+
+    let html = '';
+    html += '<div class="forecast-header">';
+    html += '  <div class="forecast-header-main">';
+    html += `    <div class="forecast-title">預報點：${latStr}, ${lonStr}</div>`;
+    html += '    <div class="forecast-sub">資料來源：Open-Meteo（免費開放 API）</div>';
+    if (typeof currentTemp === 'number') {
+      html += '    <div class="forecast-current">';
+      html += `      <span>目前溫度：${currentTemp.toFixed(1)}°C</span>`;
+      if (typeof currentWindSpeed === 'number') {
+        html += `      <span>風速：${currentWindSpeed.toFixed(1)} km/h</span>`;
+      }
+      if (typeof currentWindDir === 'number') {
+        html += `      <span>風向：${Math.round(currentWindDir)}°</span>`;
+      }
+      html += '    </div>';
+    }
+    html += '  </div>';
+    html += '  <button class="close-btn" onclick="document.getElementById(\'forecast-panel\').style.display=\'none\'">✕</button>';
+    html += '</div>';
+
+    html += '<div class="forecast-table-wrapper">';
+    html += '<table>';
+    html += '<thead><tr>';
+    html += '<th>時間</th>';
+    html += '<th>溫度 (°C)</th>';
+    html += '<th>風速 (km/h)</th>';
+    html += '<th>風向 (°)</th>';
+    html += '<th>降水 (mm)</th>';
+    html += '<th>雲量 (%)</th>';
+    html += '</tr></thead><tbody>';
+
+    for (const r of rows) {
+      html += '<tr>';
+      html += `<td>${formatLocalTime(r.time)}</td>`;
+      html += `<td>${(r.temperature ?? '-').toFixed ? r.temperature.toFixed(1) : '-'}</td>`;
+      html += `<td>${(r.windSpeed ?? '-').toFixed ? r.windSpeed.toFixed(1) : '-'}</td>`;
+      html += `<td>${r.windDirection != null ? Math.round(r.windDirection) : '-'}</td>`;
+      html += `<td>${(r.precipitation ?? '-').toFixed ? r.precipitation.toFixed(1) : '-'}</td>`;
+      html += `<td>${r.cloudCover != null ? Math.round(r.cloudCover) : '-'}</td>`;
+      html += '</tr>';
+    }
+
+    html += '</tbody></table></div>';
+
+    forecastPanel.innerHTML = html;
+    forecastPanel.style.display = 'flex';
+  }
+
+  async function fetchPointForecast(lat, lon) {
+    const url = buildOpenMeteoUrl(lat, lon);
+    try {
+      const res = await fetch(url);
+      const data = await res.json();
+      renderForecast(lat, lon, data);
+    } catch (err) {
+      console.error('抓取點預報失敗', err);
+      forecastPanel.style.display = 'none';
+    }
+  }
+
+  map.on('click', (e) => {
+    const { lat, lng } = e.latlng;
+    fetchPointForecast(lat, lng);
+  });
+</script>
+</body>
+</html>
 
